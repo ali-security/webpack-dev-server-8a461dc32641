@@ -351,3 +351,152 @@ describe('cross-origin resource policy header', () => {
       }));
   });
 });
+
+// CVE-2026-14620
+describe('cross-site request forgery on state-changing endpoints', () => {
+  const devServerPort = port1;
+  const endpoint = '/webpack-dev-server/invalidate';
+
+  function startServer(options, done) {
+    return testServer.startAwaitingCompilation(
+      config,
+      Object.assign({ port: devServerPort, host: '0.0.0.0' }, options),
+      done
+    );
+  }
+
+  function request(path, headers) {
+    return new Promise((resolve, reject) => {
+      const req = http.get(
+        {
+          host: '127.0.0.1',
+          port: devServerPort,
+          path,
+          headers: Object.assign(
+            { host: `localhost:${devServerPort}` },
+            headers
+          ),
+        },
+        (res) => {
+          let body = '';
+
+          res.on('data', (chunk) => {
+            body += chunk;
+          });
+          res.on('end', () => {
+            resolve({ status: res.statusCode, body });
+          });
+        }
+      );
+
+      req.on('error', reject);
+    });
+  }
+
+  describe('with the default options', () => {
+    let server;
+    let invalidateSpy;
+
+    beforeAll((done) => {
+      server = startServer({}, done);
+    });
+
+    afterAll(testServer.close);
+
+    beforeEach(() => {
+      invalidateSpy = jest
+        .spyOn(server, 'invalidate')
+        .mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      invalidateSpy.mockRestore();
+    });
+
+    it(`should block cross-site requests to ${endpoint}`, () =>
+      request(endpoint, {
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site',
+      }).then((res) => {
+        expect(res.status).toBe(403);
+        expect(res.body).toBe('Cross-Origin request blocked');
+        expect(invalidateSpy).not.toHaveBeenCalled();
+      }));
+
+    it(`should allow same-origin requests to ${endpoint}`, () =>
+      request(endpoint, {
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+      }).then((res) => {
+        expect(res.status).toBe(200);
+        expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      }));
+
+    it(`should allow user-initiated navigations to ${endpoint}`, () =>
+      request(endpoint, { 'sec-fetch-site': 'none' }).then((res) => {
+        expect(res.status).toBe(200);
+        expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      }));
+
+    it('should block requests with a cross-origin Origin and no Sec-Fetch metadata', () =>
+      request(endpoint, { origin: 'http://evil.example' }).then((res) => {
+        expect(res.status).toBe(403);
+        expect(res.body).toBe('Cross-Origin request blocked');
+        expect(invalidateSpy).not.toHaveBeenCalled();
+      }));
+
+    it('should allow requests with a same-origin Origin and no Sec-Fetch metadata', () =>
+      request(endpoint, { origin: `http://localhost:${devServerPort}` }).then(
+        (res) => {
+          expect(res.status).toBe(200);
+          expect(invalidateSpy).toHaveBeenCalledTimes(1);
+        }
+      ));
+
+    it('should allow requests without Sec-Fetch metadata or Origin (e.g. curl)', () =>
+      request(endpoint).then((res) => {
+        expect(res.status).toBe(200);
+        expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      }));
+  });
+
+  describe('with the "allowedHosts" option', () => {
+    let server;
+    let invalidateSpy;
+
+    beforeAll((done) => {
+      server = startServer({ allowedHosts: ['localhost'] }, done);
+    });
+
+    afterAll(testServer.close);
+
+    beforeEach(() => {
+      invalidateSpy = jest
+        .spyOn(server, 'invalidate')
+        .mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      invalidateSpy.mockRestore();
+    });
+
+    it(`should block cross-site no-cors requests to ${endpoint}`, () =>
+      request(endpoint, {
+        'sec-fetch-mode': 'no-cors',
+        'sec-fetch-site': 'cross-site',
+      }).then((res) => {
+        expect(res.status).toBe(403);
+        expect(res.body).toBe('Cross-Origin request blocked');
+        expect(invalidateSpy).not.toHaveBeenCalled();
+      }));
+
+    it(`should allow same-origin requests to ${endpoint}`, () =>
+      request(endpoint, {
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+      }).then((res) => {
+        expect(res.status).toBe(200);
+        expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      }));
+  });
+});
