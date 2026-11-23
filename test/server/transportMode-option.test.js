@@ -4,6 +4,7 @@
   class-methods-use-this
 */
 const request = require('supertest');
+const WebSocket = require('ws');
 const sockjs = require('sockjs');
 const SockJS = require('sockjs-client/dist/sockjs');
 const SockJSServer = require('../../lib/servers/SockJSServer');
@@ -434,6 +435,87 @@ describe('transportMode', () => {
             expect(data).toMatchSnapshot();
             done();
           }, 5000);
+        });
+      });
+
+      describe('with an origin header containing an IP address', () => {
+        // connects a raw web socket client with the given origin header and
+        // collects every message until the connection is closed
+        const connect = (url, origin) =>
+          new Promise((resolve) => {
+            const messages = [];
+            const client = new WebSocket(url, { origin });
+            const timer = setTimeout(() => {
+              client.terminate();
+            }, 5000);
+
+            client.on('message', (data) => {
+              const message = JSON.parse(data);
+
+              messages.push(message);
+
+              if (message.type === 'ok') {
+                client.close();
+              }
+            });
+
+            client.on('error', () => {});
+
+            client.on('close', () => {
+              clearTimeout(timer);
+              resolve(messages);
+            });
+          });
+
+        const socketModes = [
+          {
+            title: 'ws',
+            transportMode: 'ws',
+            sockPath: '/sockjs-node',
+          },
+          {
+            title: 'sockjs',
+            transportMode: 'sockjs',
+            sockPath: '/sockjs-node/websocket',
+          },
+        ];
+
+        socketModes.forEach((mode) => {
+          describe(`using "${mode.title}"`, () => {
+            beforeEach((done) => {
+              server = testServer.start(
+                config,
+                {
+                  port,
+                  host: '0.0.0.0',
+                  transportMode: mode.transportMode,
+                },
+                done
+              );
+            });
+
+            it('should disconnect a client whose IP origin does not match the host', () =>
+              connect(
+                `ws://localhost:${port}${mode.sockPath}`,
+                'http://192.168.1.1'
+              ).then((messages) => {
+                expect(messages).toEqual([
+                  { type: 'error', data: 'Invalid Host/Origin header' },
+                ]);
+                expect(server.sockets.length).toEqual(0);
+              }));
+
+            it('should accept a client whose IP origin matches the host', () =>
+              connect(
+                `ws://127.0.0.1:${port}${mode.sockPath}`,
+                `http://127.0.0.1:${port}`
+              ).then((messages) => {
+                const types = messages.map((message) => message.type);
+
+                expect(types).not.toContain('error');
+                expect(types).toContain('ok');
+              }));
+          });
         });
       });
     });
